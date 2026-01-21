@@ -11,7 +11,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -26,9 +25,6 @@ CACHE_DIR = Path(".cache_uploads")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# -----------------------------
-# Utilities: normalization
-# -----------------------------
 def _norm_col(s: str) -> str:
     s = str(s).strip().upper()
     s = re.sub(r"\s+", "", s)
@@ -46,8 +42,6 @@ def _find_col(df: pd.DataFrame, candidates: Iterable[str]) -> Optional[str]:
 
 
 def _clean_amount_series(s: pd.Series) -> pd.Series:
-    if s is None:
-        return pd.Series(dtype="float64")
     out = s.astype(str)
     out = out.str.replace(r"[\s]", "", regex=True)
     out = out.str.replace(".", "", regex=False)
@@ -62,10 +56,7 @@ def _to_datetime_series(s: pd.Series, dayfirst: bool) -> pd.Series:
 
 def _month_range(year: int, month: int) -> Tuple[pd.Timestamp, pd.Timestamp]:
     start = pd.Timestamp(year=year, month=month, day=1)
-    if month == 12:
-        end = pd.Timestamp(year=year + 1, month=1, day=1)
-    else:
-        end = pd.Timestamp(year=year, month=month + 1, day=1)
+    end = pd.Timestamp(year=year + (month == 12), month=(1 if month == 12 else month + 1), day=1)
     return start, end
 
 
@@ -83,14 +74,9 @@ def _contains_any_ci(series: pd.Series, needles: Iterable[str]) -> pd.Series:
 
 def _safe_concat(dfs: List[pd.DataFrame]) -> pd.DataFrame:
     dfs = [d for d in dfs if d is not None and not d.empty]
-    if not dfs:
-        return pd.DataFrame()
-    return pd.concat(dfs, ignore_index=True)
+    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
 
-# -----------------------------
-# Upload persistence (stream to disk + hash)
-# -----------------------------
 @dataclass(frozen=True)
 class PersistedFile:
     sha256: str
@@ -134,7 +120,6 @@ def extract_all_from_zip(zip_path: Path, wanted_exts: Tuple[str, ...]) -> List[P
         candidates = [n for n in names if n.lower().endswith(tuple(e.lower() for e in wanted_exts))]
         if not candidates:
             raise ValueError(f"Zip tidak berisi file {wanted_exts}. Isi: {names[:40]}")
-
         for chosen in sorted(candidates, key=lambda x: (len(x), x)):
             raw = zf.read(chosen)
             sha = hashlib.sha256(raw).hexdigest()
@@ -143,13 +128,9 @@ def extract_all_from_zip(zip_path: Path, wanted_exts: Tuple[str, ...]) -> List[P
             if not out_path.exists():
                 out_path.write_bytes(raw)
             out_paths.append(out_path)
-
     return out_paths
 
 
-# -----------------------------
-# Readers (optimized columns)
-# -----------------------------
 def read_excel_any(path: Path, sheet_name: Optional[str], usecols: Optional[List[str]] = None) -> pd.DataFrame:
     ext = path.suffix.lower()
     if ext == ".xlsb":
@@ -173,9 +154,6 @@ def read_csv_fast(path: Path, columns: Optional[List[str]] = None) -> pd.DataFra
     return pd.read_csv(path, usecols=columns, low_memory=False, encoding_errors="ignore")
 
 
-# -----------------------------
-# Payment Report parsing + Table 1
-# -----------------------------
 PAYMENT_EXPECTED = {
     "tanggal": ["Tanggal Pembayaran", "TANGGAL PEMBAYARAN", "TANGGAL"],
     "asal": ["ASAL", "PELAbuhan", "PELABUHAN", "CABANG"],
@@ -222,6 +200,9 @@ def parse_payment_report(
 
 
 def build_table_1_payment_detail(payment: pd.DataFrame) -> pd.DataFrame:
+    if payment.empty:
+        return pd.DataFrame()
+
     tipe = payment["tipe_pembayaran"].astype(str)
     sof = payment["sof_id"].astype(str)
 
@@ -258,18 +239,7 @@ def build_table_1_payment_detail(payment: pd.DataFrame) -> pd.DataFrame:
     tmp["ESPAY"] = _sum(is_espay)
     tmp["FINNET"] = _sum(is_finnet)
 
-    cols_a_l = [
-        "Cash",
-        "Prepaid BRI",
-        "Prepaid BNI",
-        "Prepaid Mandiri",
-        "Prepaid BCA",
-        "SKPT",
-        "IFCS",
-        "Reedem",
-        "ESPAY",
-        "FINNET",
-    ]
+    cols_a_l = ["Cash", "Prepaid BRI", "Prepaid BNI", "Prepaid Mandiri", "Prepaid BCA", "SKPT", "IFCS", "Reedem", "ESPAY", "FINNET"]
     tmp["Total (a-l)"] = tmp[cols_a_l].sum(axis=1)
 
     tmp["BCA"] = _sum(is_bca)
@@ -277,17 +247,13 @@ def build_table_1_payment_detail(payment: pd.DataFrame) -> pd.DataFrame:
     tmp["NON"] = _sum(is_non)
     tmp["Total (n-p)"] = tmp[["BCA", "NON BCA", "NON"]].sum(axis=1)
 
-    out = (
+    return (
         tmp.groupby(["tanggal", "pelabuhan"], as_index=False, sort=False)
         .sum(numeric_only=True)
         .sort_values(["tanggal", "pelabuhan"])
     )
-    return out
 
 
-# -----------------------------
-# Settlement ESPAY parsing + Table 2
-# -----------------------------
 ESPAY_EXPECTED = {
     "tanggal": ["Date", "DATE", "Tanggal", "Transaction Date"],
     "merchant": ["Merchant_Name", "MERCHANT_NAME", "Merchant Name", "VA Name", "VA_NAME"],
@@ -310,7 +276,6 @@ def parse_settlement_espay(path: Path, sheet_name: Optional[str], year: int, mon
         raise ValueError("Kolom tanggal Settlement ESPAY tidak ditemukan (Date).")
 
     tanggal = _to_datetime_series(df[cols["tanggal"]], dayfirst=dayfirst)
-
     merchant_col = cols["merchant"] or cols["va_name"]
     if merchant_col is None:
         raise ValueError("Kolom Pelabuhan Settlement ESPAY tidak ditemukan (Merchant_Name/VA Name).")
@@ -319,14 +284,12 @@ def parse_settlement_espay(path: Path, sheet_name: Optional[str], year: int, mon
     bank_col = cols["bank"] or ""
     product_col = cols["product"] or ""
 
-    amount_col = cols["settlement_amount"] or cols["amount"]
-    if amount_col is None:
-        raise ValueError("Kolom amount Settlement ESPAY tidak ditemukan (Settlement Amount / Amount).")
-
     if cols["settlement_amount"] is not None:
         net_amount = _clean_amount_series(df[cols["settlement_amount"]])
     else:
-        amt = _clean_amount_series(df[cols["amount"]]) if cols["amount"] is not None else 0.0
+        if cols["amount"] is None:
+            raise ValueError("Kolom amount Settlement ESPAY tidak ditemukan (Settlement Amount / Amount).")
+        amt = _clean_amount_series(df[cols["amount"]])
         fee = _clean_amount_series(df[cols["fee"]]) if cols["fee"] is not None else 0.0
         net_amount = amt - fee
 
@@ -348,6 +311,9 @@ def parse_settlement_espay(path: Path, sheet_name: Optional[str], year: int, mon
 
 
 def build_table_2_espay_detail(espay: pd.DataFrame) -> pd.DataFrame:
+    if espay.empty:
+        return pd.DataFrame()
+
     ch = espay["channel"].astype(str)
     is_va = _contains_ci(ch, "va")
     is_emoney = ~is_va
@@ -369,18 +335,13 @@ def build_table_2_espay_detail(espay: pd.DataFrame) -> pd.DataFrame:
     tmp["Total BCA + NON BCA"] = tmp[["BCA", "NON BCA"]].sum(axis=1)
 
     tmp["n_tx"] = 1
-
-    out = (
+    return (
         tmp.groupby(["tanggal", "pelabuhan"], as_index=False, sort=False)
         .sum(numeric_only=True)
         .sort_values(["tanggal", "pelabuhan"])
     )
-    return out
 
 
-# -----------------------------
-# Settlement FINNET parsing + Table 3
-# -----------------------------
 FINNET_EXPECTED = {
     "tanggal": ["Payment Date Time", "PAYMENT DATE TIME", "Payment Date", "DATE"],
     "merchant": ["Merchant Name", "MERCHANT NAME", "Merchant_Name", "MERCHANT_NAME"],
@@ -411,6 +372,9 @@ def parse_settlement_finnet(path: Path, sheet_name: Optional[str], year: int, mo
 
 
 def build_table_3_finnet_detail(finnet: pd.DataFrame) -> pd.DataFrame:
+    if finnet.empty:
+        return pd.DataFrame()
+
     pm = finnet["payment_method"].astype(str)
     is_va = _contains_ci(pm, "va")
     is_emoney = ~is_va
@@ -428,18 +392,13 @@ def build_table_3_finnet_detail(finnet: pd.DataFrame) -> pd.DataFrame:
     tmp["Total BCA + NON BCA"] = tmp[["BCA", "NON BCA"]].sum(axis=1)
 
     tmp["n_tx"] = 1
-
-    out = (
+    return (
         tmp.groupby(["tanggal", "pelabuhan"], as_index=False, sort=False)
         .sum(numeric_only=True)
         .sort_values(["tanggal", "pelabuhan"])
     )
-    return out
 
 
-# -----------------------------
-# Bank statement parsing
-# -----------------------------
 def _detect_date_col(df: pd.DataFrame) -> Optional[str]:
     for cand in ["Tanggal", "TANGGAL", "Date", "DATE", "Txn Date", "Transaction Date"]:
         c = _find_col(df, [cand])
@@ -459,21 +418,7 @@ def _detect_text_col(df: pd.DataFrame, preferred: List[str]) -> Optional[str]:
 
 
 def _detect_amount_col(df: pd.DataFrame) -> Optional[str]:
-    preferred = [
-        "Kredit",
-        "KREDIT",
-        "Credit",
-        "CREDIT",
-        "Mutasi Kredit",
-        "MUTASI KREDIT",
-        "CR",
-        "Amount",
-        "AMOUNT",
-        "Nominal",
-        "NOMINAL",
-        "Jumlah",
-        "JUMLAH",
-    ]
+    preferred = ["Kredit", "KREDIT", "Credit", "CREDIT", "Mutasi Kredit", "MUTASI KREDIT", "CR", "Amount", "AMOUNT", "Nominal", "NOMINAL", "Jumlah", "JUMLAH"]
     c = _find_col(df, preferred)
     if c is not None:
         return c
@@ -511,10 +456,9 @@ def parse_bank_statement(
     out["text"] = df[text_col].astype(str)
     out["amount"] = _clean_amount_series(df[amt_col]).fillna(0.0)
 
-    mask = _contains_any_ci(out["text"], keyword_filters)
-    out = out[mask].copy()
-
+    out = out[_contains_any_ci(out["text"], keyword_filters)].copy()
     out["tanggal"] = out["tanggal_raw"] + pd.to_timedelta(date_plus_days, unit="D")
+
     start, end = _month_range(year, month)
     out = out[(out["tanggal"] >= start) & (out["tanggal"] < end)].copy()
 
@@ -547,19 +491,16 @@ def assign_pelabuhan_from_text(bank_df: pd.DataFrame, pelabuhan_list: List[str])
     return out
 
 
-# -----------------------------
-# Rekonsiliasi builders
-# -----------------------------
 def _group_amount_count(df: pd.DataFrame, amount_col: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["tanggal", "pelabuhan", "amount", "n_tx"])
-    return (
-        df.groupby(["tanggal", "pelabuhan"], as_index=False, sort=False)
-        .agg(amount=(amount_col, "sum"), n_tx=("n_tx", "sum"))
-    )
+    return df.groupby(["tanggal", "pelabuhan"], as_index=False, sort=False).agg(amount=(amount_col, "sum"), n_tx=("n_tx", "sum"))
 
 
 def build_recon_espay(payment: pd.DataFrame, espay_raw: pd.DataFrame, bank_bca: pd.DataFrame, bank_non_bca: pd.DataFrame) -> pd.DataFrame:
+    if payment.empty or espay_raw.empty:
+        return pd.DataFrame()
+
     sof = payment["sof_id"].astype(str)
     is_spay = _contains_ci(sof, "spay")
     is_bca = _contains_any_ci(sof, ["bca", "blu"])
@@ -605,9 +546,7 @@ def build_recon_espay(payment: pd.DataFrame, espay_raw: pd.DataFrame, bank_bca: 
     )
 
     bank_bca_g = _group_amount_count(bank_bca, "amount").rename(columns={"amount": "dana_masuk_bca", "n_tx": "jml_dana_masuk_bca"})
-    bank_non_bca_g = _group_amount_count(bank_non_bca, "amount").rename(
-        columns={"amount": "dana_masuk_non_bca", "n_tx": "jml_dana_masuk_non_bca"}
-    )
+    bank_non_bca_g = _group_amount_count(bank_non_bca, "amount").rename(columns={"amount": "dana_masuk_non_bca", "n_tx": "jml_dana_masuk_non_bca"})
 
     out = pay_g.merge(setl_g, on=["tanggal", "pelabuhan"], how="outer")
     out = out.merge(bank_bca_g, on=["tanggal", "pelabuhan"], how="outer")
@@ -616,14 +555,15 @@ def build_recon_espay(payment: pd.DataFrame, espay_raw: pd.DataFrame, bank_bca: 
 
     out["total_dana_masuk"] = out["dana_masuk_bca"] + out["dana_masuk_non_bca"]
     out["jml_dana_masuk"] = out["jml_dana_masuk_bca"] + out["jml_dana_masuk_non_bca"]
-
     out["selisih_tiket_vs_settlement"] = out["total_tiket_detail"] - out["total_settlement_report"]
     out["selisih_dana_vs_settlement"] = out["total_dana_masuk"] - out["total_settlement_report"]
-
     return out.sort_values(["tanggal", "pelabuhan"])
 
 
 def build_recon_finnet(payment: pd.DataFrame, finnet_raw: pd.DataFrame, bank_bca: pd.DataFrame, bank_non_bca: pd.DataFrame) -> pd.DataFrame:
+    if payment.empty or finnet_raw.empty:
+        return pd.DataFrame()
+
     sof = payment["sof_id"].astype(str)
     is_spay = _contains_ci(sof, "spay")
     is_bca = _contains_any_ci(sof, ["bca", "blu"])
@@ -648,7 +588,6 @@ def build_recon_finnet(payment: pd.DataFrame, finnet_raw: pd.DataFrame, bank_bca
 
     pm = finnet_raw["payment_method"].astype(str)
     is_bca_s = _contains_any_ci(pm, ["bca", "blu"])
-
     setl = finnet_raw.copy()
     setl["settle_bca"] = setl["amount"].where(is_bca_s, 0.0)
     setl["settle_non_bca"] = setl["amount"].where(~is_bca_s, 0.0)
@@ -666,9 +605,7 @@ def build_recon_finnet(payment: pd.DataFrame, finnet_raw: pd.DataFrame, bank_bca
     )
 
     bank_bca_g = _group_amount_count(bank_bca, "amount").rename(columns={"amount": "dana_masuk_bca", "n_tx": "jml_dana_masuk_bca"})
-    bank_non_bca_g = _group_amount_count(bank_non_bca, "amount").rename(
-        columns={"amount": "dana_masuk_non_bca", "n_tx": "jml_dana_masuk_non_bca"}
-    )
+    bank_non_bca_g = _group_amount_count(bank_non_bca, "amount").rename(columns={"amount": "dana_masuk_non_bca", "n_tx": "jml_dana_masuk_non_bca"})
 
     out = pay_g.merge(setl_g, on=["tanggal", "pelabuhan"], how="outer")
     out = out.merge(bank_bca_g, on=["tanggal", "pelabuhan"], how="outer")
@@ -677,16 +614,11 @@ def build_recon_finnet(payment: pd.DataFrame, finnet_raw: pd.DataFrame, bank_bca
 
     out["total_dana_masuk"] = out["dana_masuk_bca"] + out["dana_masuk_non_bca"]
     out["jml_dana_masuk"] = out["jml_dana_masuk_bca"] + out["jml_dana_masuk_non_bca"]
-
     out["selisih_tiket_vs_settlement"] = out["total_tiket_detail"] - out["total_settlement_report"]
     out["selisih_dana_vs_settlement"] = out["total_dana_masuk"] - out["total_settlement_report"]
-
     return out.sort_values(["tanggal", "pelabuhan"])
 
 
-# -----------------------------
-# Summary tables + export
-# -----------------------------
 def build_summary(recon: pd.DataFrame, periode: str) -> pd.DataFrame:
     if recon.empty:
         return pd.DataFrame()
@@ -703,11 +635,9 @@ def build_summary(recon: pd.DataFrame, periode: str) -> pd.DataFrame:
     )
     g.insert(0, "periode", periode)
     g = g.rename(columns={"pelabuhan": "cabang"})
-
     g["selisih_menu_vs_settlement_jml_tx"] = g["menu_payment_jml_tx"] - g["settlement_jml_tx"]
     g["selisih_menu_vs_settlement_nominal"] = g["menu_payment_nominal"] - g["settlement_nominal"]
     g["selisih_dana_masuk_vs_settlement"] = g["rekening_koran"] - g["settlement_nominal"]
-
     return g.sort_values(["cabang"])
 
 
@@ -715,14 +645,21 @@ def to_excel_bytes(sheets: Dict[str, pd.DataFrame]) -> bytes:
     bio = io.BytesIO()
     with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
         for name, df in sheets.items():
+            if df is None or df.empty:
+                continue
             safe = re.sub(r"[\[\]\:\*\?\/\\]", "_", name)[:31]
             df.to_excel(writer, sheet_name=safe, index=False)
     return bio.getvalue()
 
 
-# -----------------------------
-# Streamlit App
-# -----------------------------
+def _infer_pelabuhan_list(payment: pd.DataFrame, espay: pd.DataFrame, finnet: pd.DataFrame) -> List[str]:
+    vals: List[str] = []
+    for df in (payment, espay, finnet):
+        if not df.empty and "pelabuhan" in df.columns:
+            vals.extend(df["pelabuhan"].dropna().astype(str).tolist())
+    return sorted(set(v for v in vals if v.strip()))
+
+
 def main() -> None:
     st.set_page_config(page_title=APP_TITLE, layout="wide")
     st.title(APP_TITLE)
@@ -737,183 +674,162 @@ def main() -> None:
         dayfirst = st.toggle("dayfirst (DD/MM/YYYY)", value=True)
         asal_split_mode = st.selectbox("ASAL split", ["left", "right", "full"], index=0)
 
-        st.header("Upload Files (Multiple)")
-        up_payment = st.file_uploader(
-            "Payment Report (xlsb / zip(xlsb))",
-            type=["xlsb", "zip"],
-            accept_multiple_files=True,
-        )
-        up_espay = st.file_uploader(
-            "Settlement ESPAY (csv/xlsx/xls)",
-            type=["csv", "xlsx", "xls"],
-            accept_multiple_files=True,
-        )
-        up_finnet = st.file_uploader(
-            "Settlement FINNET (zip(csv)/csv/xlsx/xls)",
-            type=["zip", "csv", "xlsx", "xls"],
-            accept_multiple_files=True,
-        )
-        up_bca = st.file_uploader(
-            "Rekening Koran BCA (xls/xlsx)",
-            type=["xls", "xlsx"],
-            accept_multiple_files=True,
-        )
-        up_non_bca = st.file_uploader(
-            "Rekening Koran Non-BCA (xls/xlsx)",
-            type=["xls", "xlsx"],
-            accept_multiple_files=True,
-        )
+        st.header("Upload Files (Multiple, Optional)")
+        up_payment = st.file_uploader("Payment Report (xlsb / zip(xlsb))", type=["xlsb", "zip"], accept_multiple_files=True) or []
+        up_espay = st.file_uploader("Settlement ESPAY (csv/xlsx/xls)", type=["csv", "xlsx", "xls"], accept_multiple_files=True) or []
+        up_finnet = st.file_uploader("Settlement FINNET (zip(csv)/csv/xlsx/xls)", type=["zip", "csv", "xlsx", "xls"], accept_multiple_files=True) or []
+        up_bca = st.file_uploader("Rekening Koran BCA (xls/xlsx)", type=["xls", "xlsx"], accept_multiple_files=True) or []
+        up_non_bca = st.file_uploader("Rekening Koran Non-BCA (xls/xlsx)", type=["xls", "xlsx"], accept_multiple_files=True) or []
 
         process = st.button("Process", type="primary", use_container_width=True)
 
     if not process:
-        st.info("Upload semua file (boleh banyak) lalu klik **Process**.")
+        st.info("Upload file apa saja (boleh sebagian) lalu klik **Process**. Yang kosong akan di-skip.")
         return
 
-    if not all([up_payment, up_espay, up_finnet, up_bca, up_non_bca]):
-        st.error("Semua kategori file wajib di-upload (boleh multiple).")
+    if not any([up_payment, up_espay, up_finnet, up_bca, up_non_bca]):
+        st.info("Tidak ada file terupload. Tidak ada yang diproses.")
         return
 
     t0 = time.time()
-    try:
-        p_payments = persist_uploads(up_payment)
-        p_espays = persist_uploads(up_espay)
-        p_finnets = persist_uploads(up_finnet)
-        p_bcas = persist_uploads(up_bca)
-        p_non_bcas = persist_uploads(up_non_bca)
 
-        # ---- Payment: parse many (zip may contain many xlsb)
-        payment_parts: List[pd.DataFrame] = []
-        with st.spinner("Parsing Payment Report (multiple)..."):
-            for pf in p_payments:
-                if pf.path.suffix.lower() == ".zip":
-                    for xlsb_path in extract_all_from_zip(pf.path, wanted_exts=(".xlsb",)):
-                        payment_parts.append(parse_payment_report(xlsb_path, None, year, month, dayfirst, asal_split_mode))
-                else:
-                    payment_parts.append(parse_payment_report(pf.path, None, year, month, dayfirst, asal_split_mode))
-            payment_df = _safe_concat(payment_parts)
-            if payment_df.empty:
-                raise ValueError("Payment Report hasil parsing kosong setelah filter periode.")
+    payment_df = pd.DataFrame()
+    espay_df = pd.DataFrame()
+    finnet_df = pd.DataFrame()
+    rk_bca = pd.DataFrame()
+    rk_non = pd.DataFrame()
+
+    table1 = pd.DataFrame()
+    table2 = pd.DataFrame()
+    table3 = pd.DataFrame()
+    recon_espay = pd.DataFrame()
+    recon_finnet = pd.DataFrame()
+    summary_espay = pd.DataFrame()
+    summary_finnet = pd.DataFrame()
+
+    try:
+        # ---- Payment
+        if up_payment:
+            p_payments = persist_uploads(up_payment)
+            parts: List[pd.DataFrame] = []
+            with st.spinner("Parsing Payment Report..."):
+                for pf in p_payments:
+                    if pf.path.suffix.lower() == ".zip":
+                        for xlsb_path in extract_all_from_zip(pf.path, wanted_exts=(".xlsb",)):
+                            parts.append(parse_payment_report(xlsb_path, None, year, month, dayfirst, asal_split_mode))
+                    else:
+                        parts.append(parse_payment_report(pf.path, None, year, month, dayfirst, asal_split_mode))
+            payment_df = _safe_concat(parts)
             table1 = build_table_1_payment_detail(payment_df)
 
-        # ---- ESPAY: parse many
-        espay_parts: List[pd.DataFrame] = []
-        with st.spinner("Parsing Settlement ESPAY (multiple)..."):
-            for pf in p_espays:
-                espay_parts.append(parse_settlement_espay(pf.path, None, year, month, dayfirst))
-            espay_df = _safe_concat(espay_parts)
-            table2 = build_table_2_espay_detail(espay_df) if not espay_df.empty else pd.DataFrame()
+        # ---- ESPAY
+        if up_espay:
+            p_espays = persist_uploads(up_espay)
+            parts = []
+            with st.spinner("Parsing Settlement ESPAY..."):
+                for pf in p_espays:
+                    parts.append(parse_settlement_espay(pf.path, None, year, month, dayfirst))
+            espay_df = _safe_concat(parts)
+            table2 = build_table_2_espay_detail(espay_df)
 
-        # ---- FINNET: parse many (zip may contain many csv)
-        finnet_parts: List[pd.DataFrame] = []
-        with st.spinner("Parsing Settlement FINNET (multiple)..."):
-            for pf in p_finnets:
-                if pf.path.suffix.lower() == ".zip":
-                    for csv_path in extract_all_from_zip(pf.path, wanted_exts=(".csv",)):
-                        finnet_parts.append(parse_settlement_finnet(csv_path, None, year, month, dayfirst))
-                else:
-                    finnet_parts.append(parse_settlement_finnet(pf.path, None, year, month, dayfirst))
-            finnet_df = _safe_concat(finnet_parts)
-            table3 = build_table_3_finnet_detail(finnet_df) if not finnet_df.empty else pd.DataFrame()
+        # ---- FINNET
+        if up_finnet:
+            p_finnets = persist_uploads(up_finnet)
+            parts = []
+            with st.spinner("Parsing Settlement FINNET..."):
+                for pf in p_finnets:
+                    if pf.path.suffix.lower() == ".zip":
+                        for csv_path in extract_all_from_zip(pf.path, wanted_exts=(".csv",)):
+                            parts.append(parse_settlement_finnet(csv_path, None, year, month, dayfirst))
+                    else:
+                        parts.append(parse_settlement_finnet(pf.path, None, year, month, dayfirst))
+            finnet_df = _safe_concat(parts)
+            table3 = build_table_3_finnet_detail(finnet_df)
 
-        pelabuhan_list = sorted(set(payment_df["pelabuhan"].dropna().astype(str).tolist()))
+        pelabuhan_list = _infer_pelabuhan_list(payment_df, espay_df, finnet_df)
 
-        # ---- Bank statements: parse many then concat
-        rk_bca_parts: List[pd.DataFrame] = []
-        with st.spinner("Parsing Rekening Koran BCA (multiple)..."):
-            for pf in p_bcas:
-                rk_bca_parts.append(
-                    parse_bank_statement(
-                        pf.path,
-                        None,
-                        year,
-                        month,
-                        dayfirst,
-                        text_candidates=["Keterangan", "KETERANGAN", "Uraian", "Description"],
-                        keyword_filters=["SGW", "FINIF", "FINON"],
-                        date_plus_days=1,
+        # ---- Bank BCA
+        if up_bca:
+            p_bcas = persist_uploads(up_bca)
+            parts = []
+            with st.spinner("Parsing Rekening Koran BCA..."):
+                for pf in p_bcas:
+                    parts.append(
+                        parse_bank_statement(
+                            pf.path,
+                            None,
+                            year,
+                            month,
+                            dayfirst,
+                            text_candidates=["Keterangan", "KETERANGAN", "Uraian", "Description"],
+                            keyword_filters=["SGW", "FINIF", "FINON"],
+                            date_plus_days=1,
+                        )
                     )
-                )
-            rk_bca = assign_pelabuhan_from_text(_safe_concat(rk_bca_parts), pelabuhan_list)
+            rk_bca = assign_pelabuhan_from_text(_safe_concat(parts), pelabuhan_list)
 
-        rk_non_parts: List[pd.DataFrame] = []
-        with st.spinner("Parsing Rekening Koran Non-BCA (multiple)..."):
-            for pf in p_non_bcas:
-                rk_non_parts.append(
-                    parse_bank_statement(
-                        pf.path,
-                        None,
-                        year,
-                        month,
-                        dayfirst,
-                        text_candidates=["Remark", "REMARK", "Keterangan", "KETERANGAN", "Uraian", "Description"],
-                        keyword_filters=["SGW", "FINIF", "FINON"],
-                        date_plus_days=1,
+        # ---- Bank Non-BCA
+        if up_non_bca:
+            p_non = persist_uploads(up_non_bca)
+            parts = []
+            with st.spinner("Parsing Rekening Koran Non-BCA..."):
+                for pf in p_non:
+                    parts.append(
+                        parse_bank_statement(
+                            pf.path,
+                            None,
+                            year,
+                            month,
+                            dayfirst,
+                            text_candidates=["Remark", "REMARK", "Keterangan", "KETERANGAN", "Uraian", "Description"],
+                            keyword_filters=["SGW", "FINIF", "FINON"],
+                            date_plus_days=1,
+                        )
                     )
-                )
-            rk_non = assign_pelabuhan_from_text(_safe_concat(rk_non_parts), pelabuhan_list)
+            rk_non = assign_pelabuhan_from_text(_safe_concat(parts), pelabuhan_list)
 
-        # Split RK keywords per recon type
-        rk_bca_sgw = rk_bca[_contains_ci(rk_bca["text"], "sgw")].copy()
-        rk_non_sgw = rk_non[_contains_ci(rk_non["text"], "sgw")].copy()
+        # ---- Recon (bank optional)
+        rk_bca_sgw = rk_bca[_contains_ci(rk_bca["text"], "sgw")].copy() if not rk_bca.empty else pd.DataFrame()
+        rk_non_sgw = rk_non[_contains_ci(rk_non["text"], "sgw")].copy() if not rk_non.empty else pd.DataFrame()
+        rk_bca_fin = rk_bca[_contains_any_ci(rk_bca["text"], ["finif", "finon"])].copy() if not rk_bca.empty else pd.DataFrame()
+        rk_non_fin = rk_non[_contains_any_ci(rk_non["text"], ["finif", "finon"])].copy() if not rk_non.empty else pd.DataFrame()
 
-        rk_bca_fin = rk_bca[_contains_any_ci(rk_bca["text"], ["finif", "finon"])].copy()
-        rk_non_fin = rk_non[_contains_any_ci(rk_non["text"], ["finif", "finon"])].copy()
-
-        with st.spinner("Building Rekonsiliasi ESPAY..."):
-            recon_espay = build_recon_espay(payment_df, espay_df, rk_bca_sgw, rk_non_sgw) if not espay_df.empty else pd.DataFrame()
-
-        with st.spinner("Building Rekonsiliasi FINNET..."):
-            recon_finnet = build_recon_finnet(payment_df, finnet_df, rk_bca_fin, rk_non_fin) if not finnet_df.empty else pd.DataFrame()
+        recon_espay = build_recon_espay(payment_df, espay_df, rk_bca_sgw, rk_non_sgw)
+        recon_finnet = build_recon_finnet(payment_df, finnet_df, rk_bca_fin, rk_non_fin)
 
         periode = f"{calendar.month_name[month]} {year}"
-        summary_espay = build_summary(recon_espay, periode=periode) if not recon_espay.empty else pd.DataFrame()
-        summary_finnet = build_summary(recon_finnet, periode=periode) if not recon_finnet.empty else pd.DataFrame()
+        summary_espay = build_summary(recon_espay, periode) if not recon_espay.empty else pd.DataFrame()
+        summary_finnet = build_summary(recon_finnet, periode) if not recon_finnet.empty else pd.DataFrame()
 
         elapsed = time.time() - t0
-        st.success(f"Selesai diproses. Waktu: {elapsed:.1f} detik")
+        st.success(f"Selesai. Waktu: {elapsed:.1f} detik")
 
-        tabs = st.tabs(
-            [
-                "1) Detail Payment",
-                "2) Detail Settlement ESPAY",
-                "3) Detail Settlement FINNET",
-                "4) Rekonsiliasi ESPAY",
-                "5) Rekonsiliasi FINNET",
-                "6) Summary ESPAY",
-                "7) Summary FINNET",
-            ]
-        )
+        # ---- Dynamic tabs (only show what exists; show info if empty but related file uploaded)
+        items: List[Tuple[str, pd.DataFrame, bool]] = [
+            ("1) Detail Payment", table1, bool(up_payment)),
+            ("2) Detail Settlement ESPAY", table2, bool(up_espay)),
+            ("3) Detail Settlement FINNET", table3, bool(up_finnet)),
+            ("4) Rekonsiliasi ESPAY", recon_espay, bool(up_payment or up_espay or up_bca or up_non_bca)),
+            ("5) Rekonsiliasi FINNET", recon_finnet, bool(up_payment or up_finnet or up_bca or up_non_bca)),
+            ("6) Summary ESPAY", summary_espay, bool(up_payment or up_espay)),
+            ("7) Summary FINNET", summary_finnet, bool(up_payment or up_finnet)),
+        ]
+        shown = [(t, df, should) for (t, df, should) in items if should]
+        if not shown:
+            st.info("Tidak ada output yang bisa ditampilkan dari file yang di-upload.")
+            return
 
-        with tabs[0]:
-            st.subheader("Table 1 - Detail Payment Report")
-            st.dataframe(table1, use_container_width=True, height=520)
+        tabs = st.tabs([t for t, _, _ in shown])
+        for tab, (title, df, _) in zip(tabs, shown):
+            with tab:
+                st.subheader(title)
+                if df is None or df.empty:
+                    st.info("Tidak ada data (mungkin karena filter periode atau input minimal belum lengkap).")
+                else:
+                    st.dataframe(df, use_container_width=True, height=520)
 
-        with tabs[1]:
-            st.subheader("Table 2 - Detail Settlement ESPAY")
-            st.dataframe(table2, use_container_width=True, height=520)
-
-        with tabs[2]:
-            st.subheader("Table 3 - Detail Settlement FINNET")
-            st.dataframe(table3, use_container_width=True, height=520)
-
-        with tabs[3]:
-            st.subheader("Table 4 - Rekonsiliasi ESPAY")
-            st.dataframe(recon_espay, use_container_width=True, height=520)
-
-        with tabs[4]:
-            st.subheader("Table 5 - Rekonsiliasi FINNET")
-            st.dataframe(recon_finnet, use_container_width=True, height=520)
-
-        with tabs[5]:
-            st.subheader("Table 6 - Summary ESPAY")
-            st.dataframe(summary_espay, use_container_width=True, height=520)
-
-        with tabs[6]:
-            st.subheader("Table 7 - Summary FINNET")
-            st.dataframe(summary_finnet, use_container_width=True, height=520)
-
-        sheets = {
+        # ---- Export only available sheets
+        sheets: Dict[str, pd.DataFrame] = {
             "1_Detail_Payment": table1,
             "2_Detail_Settlement_ESPAY": table2,
             "3_Detail_Settlement_FINNET": table3,
@@ -923,13 +839,14 @@ def main() -> None:
             "7_Summary_FINNET": summary_finnet,
         }
         xlsx_bytes = to_excel_bytes(sheets)
-        st.download_button(
-            "Download Excel (All Tables)",
-            data=xlsx_bytes,
-            file_name=f"rekon_{year}-{month:02d}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        if xlsx_bytes:
+            st.download_button(
+                "Download Excel (Available Sheets)",
+                data=xlsx_bytes,
+                file_name=f"rekon_{year}-{month:02d}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
     except Exception as e:
         st.exception(e)
