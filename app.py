@@ -260,7 +260,7 @@ PAYMENT_COLS = [
     "TIPE PEMBAYARAN",
     "TOTAL TARIF (Rp.)",
     "SOF ID",
-    "Nomor Invoice",
+    "nomer invoice",
 ]
 
 
@@ -300,7 +300,7 @@ def process_payment_report(paths: Tuple[str, ...], year: int, month: int, dayfir
             "tipe": ["TIPE PEMBAYARAN"],
             "amount": ["TOTAL TARIF (Rp.)"],
             "sof": ["SOF ID"],
-            "invoice": ["Nomor Invoice"],
+            "invoice": ["nomer invoice"],
         },
         ctx="Payment Report",
     )
